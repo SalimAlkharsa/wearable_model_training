@@ -27,11 +27,6 @@ COPY dependencies/install_tensorflow.sh install_tensorflow.sh
 RUN /bin/bash install_tensorflow.sh && \
     rm install_tensorflow.sh
 
-# Install jaxlib (separate script as this requires a different command on M1 Macs)
-COPY dependencies/install_jaxlib.sh install_jaxlib.sh
-RUN /bin/bash install_jaxlib.sh && \
-    rm install_jaxlib.sh
-
 # Copy other Python requirements in and install them
 COPY requirements.txt ./
 RUN pip3 install -r requirements.txt

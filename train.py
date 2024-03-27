@@ -1,9 +1,35 @@
 import sklearn # do this first, otherwise get a libgomp error?!
 import argparse, os, sys, random, logging
 import numpy as np
-from sklearn.linear_model import LogisticRegression
-from conversion import convert_jax
-import jax.numpy as jnp
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import train_test_split
+
+from skl2onnx import convert_sklearn
+from skl2onnx.common.data_types import FloatTensorType
+
+import onnx
+import onnxruntime as ort
+import tensorflow as tf
+
+from onnx_tf.backend import prepare
+
+
+def convert_onnx_to_tflite(onnx_model_path, tflite_model_path):
+    # Load the ONNX model
+    onnx_model = onnx.load(onnx_model_path)
+
+    # Convert ONNX model to TensorFlow model
+    tf_rep = prepare(onnx_model)
+    graph_def = tf_rep.graph.as_graph_def()
+
+    # Convert TensorFlow model to TensorFlow Lite
+    converter = tf.lite.TFLiteConverter.from_concrete_functions([tf.function(lambda: tf_rep.run(None, None))])
+    tflite_model = converter.convert()
+
+    # Save the TFLite model
+    with open(tflite_model_path, "wb") as f:
+        f.write(tflite_model)
+
 
 # Set random seeds for repeatable results
 RANDOM_SEED = 3
@@ -24,46 +50,31 @@ if not os.path.exists(out_directory):
     os.mkdir(out_directory)
 
 # grab train/test set
-X_train = np.load(os.path.join(args.data_directory, 'X_split_train.npy'))
-Y_train = np.load(os.path.join(args.data_directory, 'Y_split_train.npy'))
-X_test = np.load(os.path.join(args.data_directory, 'X_split_test.npy'))
-Y_test = np.load(os.path.join(args.data_directory, 'Y_split_test.npy'))
-
-# sparse representation of the labels (1-based)
-Y_train = np.argmax(Y_train, axis=1) + 1
-Y_test = np.argmax(Y_test, axis=1) + 1
+X_train = np.load(os.path.join(args.data_directory, 'ei-thesis-flatten-X_training.npy'))
+Y_train = np.load(os.path.join(args.data_directory, 'ei-thesis-flatten-y_training.npy'))[:, 0]
+X_train, X_test, Y_train, Y_test = train_test_split(X_train, Y_train, test_size=0.2, random_state=RANDOM_SEED)
 
 print('Training model on', str(X_train.shape[0]), 'inputs...')
 # train your model
-clf = LogisticRegression(random_state=RANDOM_SEED, max_iter=args.epochs).fit(X_train, Y_train)
+xgb_classifier = GradientBoostingClassifier(random_state=RANDOM_SEED)
+xgb_classifier.fit(X_train, Y_train)
 print('Training model OK')
 print('')
 
-print('Mean accuracy (training set):', clf.score(X_train, Y_train))
-print('Mean accuracy (validation set):', clf.score(X_test, Y_test))
+print('Mean accuracy (training set):', xgb_classifier.score(X_train, Y_train))
+print('Mean accuracy (validation set):', xgb_classifier.score(X_test, Y_test))
 print('')
 
-# here comes the magic, provide a JAX version of the `proba` function
-def minimal_predict_proba(X):
-    # create extra dimension when using 2 class labels to fix downstream tflite profiling/model testing
-    if clf.coef_.shape[0] == 1:
-        clf.coef_ = jnp.vstack([clf.coef_ * -1,clf.coef_])
-        clf.intercept_ = jnp.hstack([clf.intercept_ * -1, clf.intercept_])
-    # first the linear model
-    # see: https://github.com/scikit-learn/scikit-learn/blob/36958fb240fbe435673a9e3c52e769f01f36bec0/sklearn/linear_model/_base.py#L430
-    y = jnp.dot(X, clf.coef_.T) + clf.intercept_
-
-    # then the exponentiation
-    # see https://github.com/scikit-learn/scikit-learn/blob/36958fb240fbe435673a9e3c52e769f01f36bec0/sklearn/linear_model/_base.py#L462
-    # and https://github.com/scipy/scipy/blob/8a64c938ddf1ae4c02a08d2c5e38daeb8d061d38/scipy/special/_logit.h#L15
-    expit = jnp.exp(y)
-
-    # and finally the normalisation
-    # see: https://github.com/scikit-learn/scikit-learn/blob/36958fb240fbe435673a9e3c52e769f01f36bec0/sklearn/linear_model/_base.py#L467
-    prob = expit / expit.sum(axis=1, keepdims=True)
-    return prob
-
 print('Converting model...')
-convert_jax(X_train.shape[1:], minimal_predict_proba, os.path.join(args.out_directory, 'model.tflite'))
+# Convert XGBoost model to ONNX
+initial_type = [('float_input', FloatTensorType([None, X_train.shape[1]]))]
+onnx_model = convert_sklearn(xgb_classifier, initial_types=initial_type)
+# Convert ONNX model to TensorFlow Lite
+tf_lite_converter = OnnxConverter()
+tflite_model = tf_lite_converter.from_onnx_model(onnx_model)
+
+# Save the TFLite model
+with open("model.tflite", "wb") as f:
+    f.write(tflite_model)
 print('Converting model OK')
 print('')
